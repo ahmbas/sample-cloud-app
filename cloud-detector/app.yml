@@ -1,0 +1,136 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cloud-detector-sa
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cloud-detector-infra-reader
+rules:
+  - apiGroups: ["config.openshift.io"]
+    resources: ["infrastructures"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: cloud-detector-infra-binding
+subjects:
+  - kind: ServiceAccount
+    name: cloud-detector-sa
+    namespace: cloud-detector
+roleRef:
+  kind: ClusterRole
+  name: cloud-detector-infra-reader
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cloud-detector
+  labels:
+    app: cloud-detector
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cloud-detector
+  template:
+    metadata:
+      labels:
+        app: cloud-detector
+    spec:
+      serviceAccountName: cloud-detector-sa
+      containers:
+        - name: webserver
+          image: registry.access.redhat.com/ubi9/python-39:latest
+          command:
+            - python3
+            - -c
+            - |
+              import http.server
+              import socketserver
+              import urllib.request
+              import ssl
+              import json
+
+              def get_platform_info():
+                  token_path = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+                  try:
+                      with open(token_path, "r") as f:
+                          token = f.read().strip()
+
+                      req = urllib.request.Request(
+                          "https://kubernetes.default.svc/apis/config.openshift.io/v1/infrastructures/cluster",
+                          headers={"Authorization": f"Bearer {token}"}
+                      )
+
+                      ctx = ssl.create_default_context(
+                          cafile="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+                      )
+                      with urllib.request.urlopen(req, context=ctx, timeout=3) as response:
+                          data = json.loads(response.read().decode())
+                          platform = data.get("status", {}).get("platformStatus", {}).get("type", "")
+                          if not platform:
+                              platform = data.get("status", {}).get("platform", "")
+                          
+                          if platform.upper() == "GCP":
+                              return "Google Cloud Platform (GCP)", f"Detected OpenShift Platform: {platform}"
+                          else:
+                              return "On-Premise - Platform Agnostic", f"Detected OpenShift Platform: {platform if platform else 'None/BareMetal'}"
+                  except Exception as e:
+                      return "On-Premise - Platform Agnostic", f"API Query Error: {str(e)}"
+
+              class CloudDetectorHandler(http.server.SimpleHTTPRequestHandler):
+                  def do_GET(self):
+                      provider, details = get_platform_info()
+
+                      self.send_response(200)
+                      self.send_header("Content-type", "text/html")
+                      self.end_headers()
+                      response_html = f"""<!DOCTYPE html>
+              <html>
+              <head><title>Cloud Detector</title></head>
+              <body>
+                  <h1>OpenShift App Cloud Detection</h1>
+                  <p><strong>Underlying Provider:</strong> {provider}</p>
+                  <p><small><strong>Details:</strong> {details}</small></p>
+              </body>
+              </html>"""
+                      self.wfile.write(response_html.encode('utf-8'))
+
+              PORT = 8080
+              with socketserver.TCPServer(("", PORT), CloudDetectorHandler) as httpd:
+                  print(f"Serving HTTP on port {PORT}...")
+                  httpd.serve_forever()
+          ports:
+            - containerPort: 8080
+              name: http
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cloud-detector
+  labels:
+    app: cloud-detector
+spec:
+  ports:
+    - port: 8080
+      targetPort: 8080
+      name: http
+  selector:
+    app: cloud-detector
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: cloud-detector
+  labels:
+    app: cloud-detector
+spec:
+  to:
+    kind: Service
+    name: cloud-detector
+  port:
+    targetPort: http
