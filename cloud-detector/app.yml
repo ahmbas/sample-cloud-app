@@ -46,7 +46,7 @@ spec:
         - name: webserver
           image: registry.access.redhat.com/ubi9/python-39:latest
           command:
-             - python3
+            - python3
             - -c
             - |
               import http.server
