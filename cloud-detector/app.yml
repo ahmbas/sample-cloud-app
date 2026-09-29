@@ -46,7 +46,7 @@ spec:
         - name: webserver
           image: registry.access.redhat.com/ubi9/python-39:latest
           command:
-            - python3
+             - python3
             - -c
             - |
               import http.server
@@ -54,6 +54,7 @@ spec:
               import urllib.request
               import ssl
               import json
+              from string import Template
 
               def get_platform_info():
                   token_path = "/var/run/secrets/kubernetes.io/serviceaccount/token"
@@ -71,33 +72,224 @@ spec:
                       )
                       with urllib.request.urlopen(req, context=ctx, timeout=3) as response:
                           data = json.loads(response.read().decode())
-                          platform = data.get("status", {}).get("platformStatus", {}).get("type", "")
-                          if not platform:
-                              platform = data.get("status", {}).get("platform", "")
-                          
-                          if platform.upper() == "GCP":
-                              return "Google Cloud Platform (GCP)", f"Detected OpenShift Platform: {platform}"
-                          else:
-                              return "On-Premise - Platform Agnostic", f"Detected OpenShift Platform: {platform if platform else 'None/BareMetal'}"
+                          return data.get("status", {}), None
                   except Exception as e:
-                      return "On-Premise - Platform Agnostic", f"API Query Error: {str(e)}"
+                      return None, f"API Query Error: {str(e)}"
 
               class CloudDetectorHandler(http.server.SimpleHTTPRequestHandler):
                   def do_GET(self):
-                      provider, details = get_platform_info()
+                      status_block, error_msg = get_platform_info()
 
                       self.send_response(200)
                       self.send_header("Content-type", "text/html")
                       self.end_headers()
-                      response_html = f"""<!DOCTYPE html>
-              <html>
-              <head><title>Cloud Detector</title></head>
+
+                      if error_msg:
+                          subtitle = "Failed to load cluster details."
+                          main_content = f"""
+                          <div class="pf-v5-c-alert pf-m-danger" role="alert">
+                            <div class="pf-v5-c-alert__icon"><i class="fas fa-fw fa-exclamation-circle"></i></div>
+                            <h4 class="pf-v5-c-alert__title">Cluster API Error</h4>
+                            <div class="pf-v5-c-alert__description">{error_msg}</div>
+                          </div>
+                          """
+                      else:
+                          infra_name = status_block.get("infrastructureName", "N/A")
+                          raw_platform = status_block.get("platform", status_block.get("platformStatus", {}).get("type", "None"))
+                          topology = status_block.get("controlPlaneTopology", "N/A")
+                          cpu_part = status_block.get("cpuPartitioning", "None")
+                          api_url = status_block.get("apiServerURL", "N/A")
+                          api_int_url = status_block.get("apiServerInternalURI", "N/A")
+                          json_dump = json.dumps(status_block, indent=2)
+
+                          # Platform Icon and Text mapping
+                          gcp_svg = '''<svg width="20" height="20" viewBox="0 0 24 24" style="vertical-align: middle; margin-right: 6px;"><path fill="#EA4335" d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM19 18H6c-2.21 0-4-1.79-4-4 0-2.05 1.53-3.76 3.56-3.97l1.07-.11.5-.95C8.08 7.14 9.94 6 12 6c2.62 0 4.88 1.86 5.39 4.43l.3 1.5 1.53.11c1.56.1 2.78 1.41 2.78 2.96 0 1.65-1.35 3-3 3z"/><path fill="#4285F4" d="M19 18H6c-2.21 0-4-1.79-4-4 0-2.05 1.53-3.76 3.56-3.97l1.07-.11.5-.95C8.08 7.14 9.94 6 12 6c2.62 0 4.88 1.86 5.39 4.43l.3 1.5 1.53.11c1.56.1 2.78 1.41 2.78 2.96 0 1.65-1.35 3-3 3z"/></svg>'''
+                          
+                          if raw_platform == "GCP":
+                              platform_icon = gcp_svg
+                              provider_name = "Google Cloud Platform (GCP)"
+                          elif raw_platform in ["None", "BareMetal", "OpenStack"]:
+                              platform_icon = '<i class="fa-solid fa-server" style="color: #6a6e73; margin-right: 6px;"></i>'
+                              provider_name = "Platform Agnostic (On Premise)" if raw_platform == "None" else "Bare Metal"
+                          elif raw_platform == "AWS":
+                              platform_icon = '<i class="fa-brands fa-aws" style="color: #ff9900; margin-right: 6px;"></i>'
+                              provider_name = "Amazon Web Services (AWS)"
+                          elif raw_platform == "Azure":
+                              platform_icon = '<i class="fa-brands fa-microsoft" style="color: #0089d6; margin-right: 6px;"></i>'
+                              provider_name = "Microsoft Azure"
+                          else:
+                              platform_icon = '<i class="fa-solid fa-server" style="color: #6a6e73; margin-right: 6px;"></i>'
+                              provider_name = f"{raw_platform} Platform"
+
+                          # Provider display with icon for the Details card
+                          provider_display = f"{platform_icon} {provider_name}"
+                          
+                          # Subtitle text with badge styling (without icon)
+                          cluster_badge = f'<span class="pf-v5-c-badge pf-m-read">{infra_name}</span>'
+                          subtitle = f"Hello from cluster {cluster_badge} running on {provider_name}"
+
+                          content_template = Template("""
+                          <div class="pf-v5-c-tabs" id="console-tabs" style="background-color: var(--pf-v5-global--BackgroundColor--100); border-bottom: 1px solid var(--pf-v5-global--BorderColor--100); margin-bottom: 24px;">
+                            <ul class="pf-v5-c-tabs__list">
+                              <li class="pf-v5-c-tabs__item pf-m-current" id="tab-overview-item">
+                                <button class="pf-v5-c-tabs__link" onclick="switchTab('overview')">
+                                  <span class="pf-v5-c-tabs__item-text">Overview</span>
+                                </button>
+                              </li>
+                              <li class="pf-v5-c-tabs__item" id="tab-json-item">
+                                <button class="pf-v5-c-tabs__link" onclick="switchTab('json')">
+                                  <span class="pf-v5-c-tabs__item-text">Raw Status Block</span>
+                                </button>
+                              </li>
+                            </ul>
+                          </div>
+
+                          <div id="tab-overview" class="pf-v5-l-grid pf-m-gutter">
+                            <div class="pf-v5-l-grid__item pf-m-12-col-on-sm pf-m-6-col-on-md">
+                              <div class="pf-v5-c-card">
+                                <div class="pf-v5-c-card__title">Details</div>
+                                <div class="pf-v5-c-card__body">
+                                  <dl class="pf-v5-c-description-list">
+                                    <div class="pf-v5-c-description-list__group">
+                                      <dt class="pf-v5-c-description-list__term">Infrastructure Name</dt>
+                                      <dd class="pf-v5-c-description-list__description"><span class="pf-v5-c-badge pf-m-read">$infra_name</span></dd>
+                                    </div>
+                                    <div class="pf-v5-c-description-list__group">
+                                      <dt class="pf-v5-c-description-list__term">Platform Type</dt>
+                                      <dd class="pf-v5-c-description-list__description" style="display: flex; align-items: center;">$provider_display</dd>
+                                    </div>
+                                    <div class="pf-v5-c-description-list__group">
+                                      <dt class="pf-v5-c-description-list__term">Control Plane Topology</dt>
+                                      <dd class="pf-v5-c-description-list__description">$topology</dd>
+                                    </div>
+                                    <div class="pf-v5-c-description-list__group">
+                                      <dt class="pf-v5-c-description-list__term">CPU Partitioning</dt>
+                                      <dd class="pf-v5-c-description-list__description">$cpu_part</dd>
+                                    </div>
+                                  </dl>
+                                </div>
+                              </div>
+                            </div>
+
+                            <div class="pf-v5-l-grid__item pf-m-12-col-on-sm pf-m-6-col-on-md">
+                              <div class="pf-v5-c-card">
+                                <div class="pf-v5-c-card__title">API Server Endpoints</div>
+                                <div class="pf-v5-c-card__body">
+                                  <dl class="pf-v5-c-description-list">
+                                    <div class="pf-v5-c-description-list__group">
+                                      <dt class="pf-v5-c-description-list__term">External API Server URL</dt>
+                                      <dd class="pf-v5-c-description-list__description">
+                                        <a href="$api_url" target="_blank" style="word-break: break-all;">$api_url</a>
+                                      </dd>
+                                    </div>
+                                    <div class="pf-v5-c-description-list__group">
+                                      <dt class="pf-v5-c-description-list__term">Internal API Server URI</dt>
+                                      <dd class="pf-v5-c-description-list__description">
+                                        <code style="word-break: break-all; background: #f0f0f0; padding: 2px 6px; border-radius: 3px;">$api_int_url</code>
+                                      </dd>
+                                    </div>
+                                  </dl>
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+
+                          <div id="tab-json" style="display: none;">
+                            <div class="pf-v5-c-card">
+                              <div class="pf-v5-c-card__body">
+                                <pre style="background-color: #1e1e1e; color: #d4d4d4; padding: 16px; border-radius: 4px; overflow: auto; font-family: monospace; max-height: 500px;">$json_dump</pre>
+                              </div>
+                            </div>
+                          </div>
+                          """)
+
+                          main_content = content_template.substitute(
+                              infra_name=infra_name,
+                              provider_display=provider_display,
+                              topology=topology,
+                              cpu_part=cpu_part,
+                              api_url=api_url,
+                              api_int_url=api_int_url,
+                              json_dump=json_dump
+                          )
+
+                      html_template = Template("""<!DOCTYPE html>
+              <html lang="en">
+              <head>
+                  <meta charset="UTF-8">
+                  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                  <title>Cloud Detection Application</title>
+                  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@patternfly/patternfly@5.1.0/patternfly.min.css">
+                  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@patternfly/patternfly@5.1.0/patternfly-addons.css">
+                  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+                  <style>
+                    body {
+                      background-color: #f0f2f5;
+                      font-family: RedHatText, Overpass, Helvetica, Arial, sans-serif;
+                      margin: 0;
+                    }
+                    .masthead {
+                      background-color: #151515;
+                      color: #fff;
+                      padding: 12px 24px;
+                      display: flex;
+                      align-items: center;
+                      gap: 12px;
+                    }
+                    .masthead-logo {
+                      display: flex;
+                      align-items: center;
+                      gap: 8px;
+                      font-weight: 600;
+                      font-size: 16px;
+                      color: #fff;
+                    }
+                    .masthead-logo i {
+                      color: #ee0000;
+                    }
+                    .page-header {
+                      background-color: #fff;
+                      padding: 24px 24px 0 24px;
+                      border-bottom: 1px solid #d2d6dc;
+                    }
+                    .page-content {
+                      padding: 24px;
+                    }
+                  </style>
+              </head>
               <body>
-                  <h1>OpenShift App Cloud Detection</h1>
-                  <p><strong>Underlying Provider:</strong> {provider}</p>
-                  <p><small><strong>Details:</strong> {details}</small></p>
+                  <header class="masthead">
+                    <div class="masthead-logo">
+                      <i class="fa-brands fa-redhat fa-lg"></i>
+                      <span>Red Hat OpenShift</span>
+                    </div>
+                  </header>
+
+                  <div class="page-header">
+                    <h1 class="pf-v5-c-title pf-m-2xl" style="margin-bottom: 8px;">Cross Cluster Application</h1>
+                    <p style="color: #6a6e73; margin-bottom: 16px; display: flex; align-items: center; gap: 6px;">$subtitle</p>
+                  </div>
+
+                  <main class="page-content">
+                    $main_content
+                  </main>
+
+                  <script>
+                    function switchTab(tabName) {
+                      document.getElementById('tab-overview').style.display = tabName === 'overview' ? 'grid' : 'none';
+                      document.getElementById('tab-json').style.display = tabName === 'json' ? 'block' : 'none';
+
+                      document.getElementById('tab-overview-item').classList.toggle('pf-m-current', tabName === 'overview');
+                      document.getElementById('tab-json-item').classList.toggle('pf-m-current', tabName === 'json');
+                    }
+                  </script>
               </body>
-              </html>"""
+              </html>""")
+
+                      response_html = html_template.substitute(
+                          subtitle=subtitle,
+                          main_content=main_content
+                      )
                       self.wfile.write(response_html.encode('utf-8'))
 
               PORT = 8080
