@@ -1,0 +1,144 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cross-cluster-sa
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cross-cluster-infra-reader
+rules:
+  - apiGroups: ["config.openshift.io"]
+    resources: ["infrastructures"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: cross-cluster-infra-binding
+subjects:
+  - kind: ServiceAccount
+    name: cross-cluster-sa
+    namespace: cross-cluster-app
+roleRef:
+  kind: ClusterRole
+  name: cross-cluster-infra-reader
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cross-cluster
+  labels:
+    app: cross-cluster
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cross-cluster
+  template:
+    metadata:
+      labels:
+        app: cross-cluster
+    spec:
+      serviceAccountName: cross-cluster-sa
+      containers:
+        - name: webserver
+          image: registry.access.redhat.com/ubi9/python-39:latest
+          command:
+            - python3
+            - -c
+            - |
+              import http.server
+              import socketserver
+              import urllib.request
+              import ssl
+              import json
+
+              def get_platform_info():
+                  token_path = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+                  try:
+                      with open(token_path, "r") as f:
+                          token = f.read().strip()
+
+                      req = urllib.request.Request(
+                          "https://kubernetes.default.svc/apis/config.openshift.io/v1/infrastructures/cluster",
+                          headers={"Authorization": f"Bearer {token}"}
+                      )
+
+                      ctx = ssl.create_default_context(
+                          cafile="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+                      )
+                      with urllib.request.urlopen(req, context=ctx, timeout=3) as response:
+                          data = json.loads(response.read().decode())
+                          
+                          # Extract and pretty-print the entire raw status block
+                          status_block = data.get("status", {})
+                          return json.dumps(status_block, indent=4), None
+                  except Exception as e:
+                      return None, f"API Query Error: {str(e)}"
+
+              class CloudDetectorHandler(http.server.SimpleHTTPRequestHandler):
+                  def do_GET(self):
+                      status_dump, error_msg = get_platform_info()
+
+                      self.send_response(200)
+                      self.send_header("Content-type", "text/html")
+                      self.end_headers()
+                      
+                      if error_msg:
+                          content_html = f"""
+                          <h2 style="color:red;">Error</h2>
+                          <pre style="background:#ffebe6; padding:15px; border:1px solid red;">{error_msg}</pre>
+                          """
+                      else:
+                          content_html = f"""
+                          <h2>Cluster Response Details</h2>
+                          <pre style="background:#f4f4f4; padding:15px; border:1px solid #ccc; font-family:monospace; overflow:auto;">{status_dump}</pre>
+                          """
+
+                      response_html = f"""<!DOCTYPE html>
+              <html>
+              <head><title>Cross Cluster Application</title></head>
+              <body>
+                  <h1>Webserver running across multiple clusters</h1>
+                  {content_html}
+              </body>
+              </html>"""
+                      self.wfile.write(response_html.encode('utf-8'))
+
+              PORT = 8080
+              with socketserver.TCPServer(("", PORT), CloudDetectorHandler) as httpd:
+                  print(f"Serving HTTP on port {PORT}...")
+                  httpd.serve_forever()
+          ports:
+            - containerPort: 8080
+              name: http
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cross-cluster
+  labels:
+    app: cross-cluster
+spec:
+  ports:
+    - port: 8080
+      targetPort: 8080
+      name: http
+  selector:
+    app: cross-cluster
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: cross-cluster
+  labels:
+    app: cross-cluster
+spec:
+  host: cross-cluster.example.com
+  to:
+    kind: Service
+    name: cross-cluster
+  port:
+    targetPort: http
