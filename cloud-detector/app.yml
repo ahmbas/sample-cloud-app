@@ -129,6 +129,7 @@ metadata:
   labels:
     app: cloud-detector
 spec:
+  host: cloud-detector.example.com
   to:
     kind: Service
     name: cloud-detector
