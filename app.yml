@@ -19,7 +19,7 @@ metadata:
 subjects:
   - kind: ServiceAccount
     name: cloud-detector-sa
-    namespace: test-namepace-app
+    namespace: cloud-detector
 roleRef:
   kind: ClusterRole
   name: cloud-detector-infra-reader
